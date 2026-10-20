@@ -1,0 +1,1 @@
+This contains all details about the frontend
