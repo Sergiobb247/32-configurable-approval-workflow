@@ -1,0 +1,21 @@
+# Configurable Approval Workflow — backend dependencies
+# Owner: Person D (Ops). Contract: docs/technical-spec.md §11, test-plan.md §7.
+# CI installs THIS file then runs pytest, so test-only tools live here too
+# (a deliberate two-day-MVP simplification, noted in the project README).
+
+# --- API / data ---
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0
+pydantic>=2.7
+email-validator>=2.0
+psycopg2-binary>=2.9
+
+# --- Auth (Person A) ---
+PyJWT>=2.8
+bcrypt>=4.0,<5.0
+passlib[bcrypt]>=1.7.4
+
+# --- Tests (everyone; run by CI on every pull request) ---
+httpx>=0.27
+pytest>=8.0
