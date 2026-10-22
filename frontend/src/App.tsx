@@ -398,7 +398,7 @@ function RequestDetail({ user, setError, notify }: { user: User; setError: (mess
 }
 
 function formatAuditAction(action: string) {
-  return action.replaceAll("_", " ").toLowerCase().replace(/\b\w/g, char => char.toUpperCase());
+  return action.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, char => char.toUpperCase());
 }
 function auditActor(event: AuditEntry) {
   return typeof event.actor === "string" ? event.actor : event.actor?.full_name || "Team member";
