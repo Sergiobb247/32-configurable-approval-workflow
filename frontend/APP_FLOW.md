@@ -24,11 +24,11 @@ stateDiagram-v2
 
 **Every arrow that is not drawn is illegal** and returns `409`. That is the entire state machine — five states, four actions, and one rule: terminals stay terminal.
 
-Worked example, "Expense approval (> ₦100,000)" with steps `MANAGER → FINANCE → ADMIN`:
+Worked example, "Expense approval (> ₦100,000)" with steps `MANAGER → FINANCE`:
 
 ```
 DRAFT ──submit──▸ PENDING(step 1, MANAGER) ──approve──▸ PENDING(step 2, FINANCE)
-      ──approve──▸ PENDING(step 3, ADMIN) ──approve──▸ APPROVED
+      ──approve──▸ APPROVED
 ```
 
 Reject at any point: `─reject──▸ REJECTED`, and steps after it never happen.
@@ -52,7 +52,7 @@ flowchart TD
     AD --> GA[Global audit]
 ```
 
-The employee never sees an inbox. The approver sees an inbox first. The admin sees configuration first. Everyone shares the same request-detail screen — it adapts from `can_act`.
+The employee never sees an inbox. Managers and Finance users see the approval inbox when a request reaches their role. The admin sees configuration first and does not approve requests. Everyone shares the same request-detail screen — it adapts from `can_act`.
 
 ---
 
@@ -64,7 +64,7 @@ Six screens. No more. This is the whole UI.
 |---|---|---|---|---|
 | **Login** | everyone, unauthenticated | — | `POST /auth/login` | E |
 | **My Requests** | employee, manager, finance | `GET /requests` | `POST /requests`, `/submit`, `/cancel` | E |
-| **Inbox** | manager, finance, admin | `GET /inbox` | — | E |
+| **Inbox** | manager, finance | `GET /inbox` | — | E |
 | **Request Detail** | anyone who may view | `GET /requests/{id}`, `GET /requests/{id}/audit` | `POST /approve`, `/reject`, `/submit`, `/cancel` | E |
 | **Workflow Builder** | admin | `GET /workflows` | `POST /workflows`, `POST /workflows/{id}/steps`, `PATCH /workflows/{id}` | E |
 | **Users** | admin | `GET /users` | `PATCH /users/{id}` | E |
@@ -78,18 +78,16 @@ Plus a header on every authenticated screen: the user's name, role chip, **Sign 
 The demo path. If all of this works, the product works.
 
 ```
-1. ADMIN       logs in → Workflow Builder → creates "Manager → Finance → Admin"
+1. ADMIN       logs in → Workflow Builder → creates "Manager → Finance"
 2. EMPLOYEE    logs in → New request (₦450,000) → Submit
                    request: status PENDING, current_step_index 0, chain snapshotted
 3. MANAGER     logs in → Inbox (1 item) → opens it → Approve ("within budget")
                    request: PENDING, current_step_index 1
                    audit: SUBMITTED, APPROVED
 4. FINANCE     logs in → Inbox (1 item) → opens it → Approve
-                   request: PENDING, current_step_index 2
-5. ADMIN       logs in → Inbox (1 item) → opens it → Approve
                    request: APPROVED, decided_at set
-6. EMPLOYEE    opens it → sees three green steps and the full trail
-7. ADMIN       opens global audit → five rows, in order
+5. EMPLOYEE    opens it → sees both completed steps and the full trail
+6. ADMIN       opens global audit → sees the recorded workflow and request events
 ```
 
 Screens touched by more than one role: **Request Detail**. Design it once, drive it from data, not from role checks.
@@ -125,12 +123,12 @@ Each of these is a demo beat and a test case. They are the reason the app looks 
 /requests         → My Requests            (any authenticated user)
 /requests/new     → New request form       (any authenticated user)
 /requests/:id     → Request Detail         (any authenticated user; server decides visibility)
-/inbox            → Inbox                  (MANAGER, FINANCE, ADMIN)
+/inbox            → Inbox                  (MANAGER, FINANCE)
 /workflows        → Workflow Builder       (ADMIN)
 /users            → Users                  (ADMIN)
 ```
 
-`ProtectedRoute` handles "not signed in" and "wrong role". **The server enforces the same rules** — the guard is a convenience, the API is the authority. Any judge can paste a URL and see the difference.
+`Authenticated route guards` handle "not signed in" and "wrong role". **The server enforces the same rules** — the guard is a convenience, the API is the authority. Admins are not approvers even if they open a request directly.
 
 ---
 

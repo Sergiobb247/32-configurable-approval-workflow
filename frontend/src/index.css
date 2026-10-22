@@ -102,3 +102,29 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,te
 .admin-tabs { display:flex;gap:5px;padding:14px 20px 0;border-bottom:1px solid #edf0f5; }
 .admin-tab { border:0;border-bottom:2px solid transparent;background:transparent;color:#748096;padding:10px 12px;font-size:11px;font-weight:600;cursor:pointer; }
 .admin-tab-active { border-bottom-color:#2563eb;color:#2563eb; }
+
+/* Final workflow editor + API-state polish. */
+.toolbar-select { min-height:36px; border:1px solid #dfe5ee; background:#fff; color:#42516a; border-radius:8px; padding:0 10px; font-size:11px; }
+.toolbar-select:focus { border-color:#93b4fa; outline:none; box-shadow:0 0 0 3px #dbeafe80; }
+.workflow-step-editor-header { display:flex; align-items:flex-end; justify-content:space-between; gap:15px; margin-top:22px; }
+.workflow-step-editor-header .field-label { margin:0; }
+.workflow-step-editor { display:flex; flex-direction:column; gap:9px; margin-top:9px; }
+.workflow-step-row { display:grid; grid-template-columns:92px minmax(120px,170px) minmax(0,1fr) auto; gap:9px; align-items:center; padding:9px; border:1px solid #e5eaf1; border-radius:10px; background:#fbfcfe; }
+.workflow-step-row .text-input { margin:0; min-height:38px; }
+.workflow-drag { display:flex; align-items:center; gap:8px; color:#8b96a8; font-size:11px; }
+.workflow-drag strong { color:#40506a; width:22px; height:22px; border-radius:7px; display:grid; place-items:center; background:#eef3fa; }
+.step-row-actions { display:flex; align-items:center; gap:2px; }
+.step-row-actions .icon-button { width:31px; height:31px; }
+.danger-icon { color:#b42318; }
+.danger-icon:hover { background:#fff1f0; color:#991b1b; }
+.timeline-marker.timeline-current { background:#fff4d6; color:#a56b0c; border-color:#f2d89b; }
+.timeline-marker.timeline-stopped { background:#ffebea; color:#991b1b; border-color:#f2c6c3; }
+.timeline-state-stop { color:#b42318; }
+.detail-permission-note { margin-top:18px; }
+@media (max-width:700px) {
+  .workflow-step-editor-header { align-items:flex-start; flex-direction:column; }
+  .workflow-step-row { grid-template-columns:1fr; gap:8px; }
+  .workflow-drag { justify-content:flex-start; }
+  .step-row-actions { justify-content:flex-end; }
+  .toolbar-select { flex:1; min-width:130px; }
+}

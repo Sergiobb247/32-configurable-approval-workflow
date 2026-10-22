@@ -1,8 +1,16 @@
 # FlowApprove frontend
 
-React + Vite frontend for the Configurable Approval Workflow API. The screens follow `APP_FLOW.md`; requests, inbox items, workflow configuration, user changes, and audit entries are loaded from the real API rather than replaced with demo data.
+Professional React + Vite frontend for the existing FlowApprove Configurable Approval Workflow API.
 
-## Run locally
+The frontend is intentionally adapted to the existing FastAPI contract. **The backend is not modified by this project.** Server-side authorization remains the source of truth.
+
+## Prerequisites
+
+- Node.js 18+
+- npm 9+
+- The existing FlowApprove FastAPI backend running and reachable from the browser
+
+## Install and run
 
 ```bash
 cd frontend
@@ -11,42 +19,98 @@ cp .env.example .env
 npm run dev
 ```
 
-Set the API URL in `.env`:
+Set the backend URL in `frontend/.env`:
 
 ```env
 VITE_API_URL=http://localhost:8000
 ```
 
-The FastAPI CORS settings must allow `http://localhost:5173`.
+The FastAPI backend must allow the Vite origin (`http://localhost:5173`) through its existing CORS configuration.
 
-## Role-based landing pages
+## Production build
 
-- **EMPLOYEE** → My Requests
-- **MANAGER / FINANCE** → Approval Inbox
-- **ADMIN** → Workflow Builder
+```bash
+npm run build
+```
 
-All authenticated users can open My Requests and a request detail page. The shared request detail view renders approval progress, the audit trail, and only the actions the API says are available (`can_act`). The server remains the authority for access and legal state transitions.
+Preview the production build with:
 
-## Included flows
+```bash
+npm run preview
+```
 
-- Create a draft request, then submit it from Request Detail.
-- Approve or reject from the shared Request Detail view; rejection requires a comment inline.
-- Cancel a non-terminal request when allowed by the API.
-- Create, edit, activate, deactivate, and re-chain workflows.
-- Change another user's role or active status; self-modification is disabled in the UI.
-- View request audit history and the global audit feed (as a tab within Users, keeping the screen map compact).
-- Refresh an expired access token once; if refresh fails, clear the session and redirect to Login.
-- Display API error details, including permission and conflict errors, instead of mock success states.
+## Application routes
+
+- `/login` — authentication
+- `/requests` — My Requests for normal users; All Requests for Admin
+- `/requests/new` — create a draft request
+- `/requests/:id` — request details, approval progress, and audit history
+- `/inbox` — Manager / Finance approval inbox
+- `/workflows` — Admin workflow builder
+- `/users` — Admin user management and global audit tab
+
+The root route (`/`) redirects to the appropriate landing screen for the signed-in role.
+
+## Supported role behaviour
+
+- **Employee:** creates and tracks their own requests.
+- **Manager:** sees the approval inbox when a request reaches a Manager step.
+- **Finance:** sees the approval inbox when a request reaches a Finance step.
+- **Admin:** manages workflows and users, can view all requests, and can cancel requests when the backend permits it. Admins do **not** approve requests.
+
+The workflow editor only offers Manager and Finance as approval roles because the existing backend explicitly rejects `ADMIN` workflow steps.
+
+## Frontend/API behaviour
+
+- Access tokens are kept in session storage; refresh tokens use the existing refresh-token contract.
+- A failed access-token request attempts one coordinated refresh before the session is cleared.
+- API errors preserve the backend's human-readable `detail` message.
+- Request detail renders the real `steps` returned by the API. Drafts correctly show that the approval snapshot is created when submitted instead of claiming that step data is missing.
+- Approval, rejection, submission, cancellation, workflow changes, and user changes only show success after the real API confirms the operation.
+- Rejection and cancellation require confirmation because they are terminal actions.
+- Stale/conflicting approval actions refresh the authoritative request state after the backend response.
 
 ## Demo accounts
 
-The seeded demo accounts use `Password123!` locally. The login page has quick-fill options for Employee, Manager, Finance, and Admin.
+The seeded local backend accounts use:
 
-## Important workflow contract note
+```text
+Password123!
+```
 
-The supplied `APP_FLOW.md` demo describes `MANAGER → FINANCE → ADMIN`, with Admin approving the final step. The current backend explicitly rejects workflows containing an `ADMIN` approval step and says admins configure workflows but cannot approve requests. The frontend follows the backend's enforceable contract and currently offers Manager and Finance as approver roles. To make the Admin-final-approval demo work, the product flow and backend permissions must be reconciled before enabling an Admin step in the UI; otherwise the form would advertise a workflow the API rejects.
+Typical accounts from the existing seed data include:
+
+```text
+employee1@demo.io
+manager1@demo.io
+finance@demo.io
+admin@demo.io
+```
 
 ## Verification
 
-Run `npm run build` after installing dependencies. The source files were syntax-checked in this environment, but a full build could not be completed here because `npm install` could not finish fetching packages.
+The final frontend source was checked for TypeScript/JSX syntax with the available TypeScript compiler in this environment. A complete `npm run build` could not be executed here because this uploaded project did not include `node_modules` and package installation could not complete within the available execution window.
 
+To perform the final local verification in VS Code:
+
+```bash
+cd frontend
+npm install
+npm run build
+npm run dev
+```
+
+Then run the end-to-end role flow against the existing backend:
+
+1. Admin → create/activate a Manager → Finance workflow.
+2. Employee → create a draft → submit it.
+3. Manager → approve from Inbox.
+4. Finance → approve from Inbox.
+5. Employee/Admin → open the request and verify the final status and complete audit trail.
+6. Confirm Admin has no approval action and cannot be configured as a workflow approver.
+
+## Backend-dependent limitations
+
+- The frontend cannot make an Admin an approver because the existing backend rejects `ADMIN` workflow steps and denies Admin approval actions.
+- Request and audit pagination is available through the API; the frontend loads up to 200 records per screen for the current business-scale UI and performs search/filtering client-side.
+- The frontend does not invent notification, email, export, or other capabilities that are not provided by the existing backend.
