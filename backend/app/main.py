@@ -14,16 +14,13 @@ with their owners (A: auth/users, C: requests/approvals, D:
 workflows/audit), rules live in the domain layer, and no import in this
 file reaches for `request.status` or `audit_logs` (the one-writer rules).
 
-C's routers (endpoints 13–20) are registered via `_include_optional_router`:
-they are included the moment Person C's files land, and until then the app
-boots honestly with A's + D's endpoints instead of crashing at import time.
-This mirrors the defensive pattern A already uses for `services/audit` in
-`routes/users.py`.
+Every router is imported and registered directly. C's routers (endpoints
+13–20) are part of the tree, so a broken import here fails at startup — loudly
+— instead of silently serving a smaller API.
 """
 
 from __future__ import annotations
 
-import importlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -35,8 +32,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app import models  # noqa: F401  (registers every table on Base.metadata)
 from app.config import settings
 from app.database import Base, engine
+from app.routes import approvals as approval_routes
 from app.routes import audit as audit_routes
 from app.routes import auth as auth_routes
+from app.routes import requests as request_routes
 from app.routes import users as users_routes
 from app.routes import workflows as workflow_routes
 from app.schemas import HealthOut
@@ -144,23 +143,8 @@ app.include_router(workflow_routes.router)   # D — endpoints 8–12
 app.include_router(audit_routes.router)      # D — endpoints 21–22
 
 
-def _include_optional_router(module_path: str) -> None:
-    """Register a teammate's router if (and only if) their file has landed.
-
-    Only a missing module is tolerated; an import error *inside* a router
-    that exists is a real bug and is allowed to crash the boot loudly.
-    """
-    try:
-        module = importlib.import_module(module_path)
-    except ModuleNotFoundError as exc:
-        if exc.name == module_path:
-            return
-        raise
-    app.include_router(module.router)
-
-
 # C — endpoints 13–20 (requests + approvals). Picked up automatically the
 # moment `routes/requests.py` / `routes/approvals.py` are merged; no edit to
 # this file will be needed at integration time.
-_include_optional_router("app.routes.requests")
-_include_optional_router("app.routes.approvals")
+app.include_router(request_routes.router)    # C — endpoints 13–17
+app.include_router(approval_routes.router)   # C — endpoints 18–20
