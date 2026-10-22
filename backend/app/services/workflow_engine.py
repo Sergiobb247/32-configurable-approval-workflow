@@ -66,6 +66,7 @@ from app.permissions import (
     is_terminal,
 )
 from app.schemas import RequestOut, StepOut, StepState
+from app.services import audit as audit_service
 
 # --- catalogue sentences (technical-spec.md section 8) -----------------------
 
@@ -98,46 +99,19 @@ def _audit(
     Prefers Person D's `services/audit.record()`; D's function flushes but does
     not commit, which is exactly what we need (the status change and its audit
     row commit together or not at all).
+     it delegates to audit.record()
     """
-    try:  # D's module (app/services/audit.py)
-        from app.services import audit as audit_service
-    except ImportError:  # pragma: no cover - only before D merges
-        # ImportError, not ModuleNotFoundError: the package exists, the module
-        # inside it does not yet.
-        audit_service = None
-
-    record = getattr(audit_service, "record", None) if audit_service else None
-    if callable(record):
-        return record(
-            db,
-            actor=actor,
-            action=action,
-            entity_type=entity_type,
-            entity_id=entity_id,
-            request_id=request_id,
-            from_state=from_state,
-            to_state=to_state,
-            comment=comment,
-        )
-
-    # TEMPORARY FALLBACK — exists only because app/services/audit.py (Person D)
-    # is not merged yet. It writes the same row shape, but it is NOT the
-    # contract: delete this block (and this comment) as soon as D's record()
-    # is on develop, so there is exactly one writer of audit_logs again.
-    entry = AuditLog(  # pragma: no cover - removed on integration
-        actor_id=actor.id,
-        request_id=request_id,
+    return audit_service.record(
+        db,
+        actor=actor,
         action=action,
         entity_type=entity_type,
         entity_id=entity_id,
+        request_id=request_id,
         from_state=from_state,
         to_state=to_state,
         comment=comment,
-        created_at=utcnow(),
     )
-    db.add(entry)
-    db.flush()  # assign the id, do NOT commit
-    return entry  # pragma: no cover
 
 
 # --- reads --------------------------------------------------------------------
