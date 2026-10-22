@@ -49,3 +49,4 @@ The supplied `APP_FLOW.md` demo describes `MANAGER → FINANCE → ADMIN`, with 
 ## Verification
 
 Run `npm run build` after installing dependencies. The source files were syntax-checked in this environment, but a full build could not be completed here because `npm install` could not finish fetching packages.
+
