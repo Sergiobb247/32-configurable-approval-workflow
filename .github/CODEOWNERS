@@ -1,0 +1,43 @@
+# CODEOWNERS - auto-assigns the owner of each area as reviewer.
+# Owner: Person D. Contract: docs/git-workflow.md section 7.
+#
+# Handles confirmed from git history so far:
+#   Person A (Gogo Frank)               -> @fats-cmd
+#   Person B (Saviour Menebari Peba) -> @mspeba
+# TODO (before relying on this file): fill in the real GitHub handles for
+# Person C (Eze Chebem), Person D (Moses Abigail) and Person E
+# (Damiebi William-West) and uncomment their lines. Wrong handles are worse
+# than none - GitHub flags the whole file invalid. Until then, tag the area
+# owner manually on every PR (the habit matters more than the automation).
+
+# Person B - Domain & Contracts
+/backend/app/models/                      @mspeba
+/backend/app/schemas/                     @mspeba
+/backend/app/state_machine.py             @mspeba
+/backend/tests/conftest.py                @mspeba
+/backend/tests/factories.py               @mspeba
+
+# Person A - Identity & Access
+/backend/app/auth/                        @fats-cmd
+/backend/app/config.py                    @fats-cmd
+/backend/app/database.py                  @fats-cmd
+/backend/app/routes/users.py              @fats-cmd
+/backend/app/routes/auth.py               @fats-cmd
+/backend/app/models/refresh_token.py      @fats-cmd
+
+# Person C - Approval Engine (TODO: real handle, then uncomment)
+# /backend/app/permissions.py               @eze
+# /backend/app/services/workflow_engine.py  @eze
+# /backend/app/routes/requests.py           @eze
+# /backend/app/routes/approvals.py          @eze
+
+# Person D - Workflows, Audit & Ops (TODO: real handle, then uncomment)
+# /backend/app/services/audit.py            @moses
+# /backend/app/routes/workflows.py          @moses
+# /backend/app/routes/audit.py              @moses
+# /backend/app/main.py                      @moses
+# /backend/seed.py                          @moses
+# /.github/                                 @moses
+
+# Person E - Frontend (TODO: real handle, then uncomment)
+# /frontend/                                @damiebi

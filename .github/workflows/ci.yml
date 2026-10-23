@@ -1,0 +1,64 @@
+name: CI
+
+# Owner: Person D (Ops). Contract: docs/test-plan.md section 7.
+# A red CI blocks the merge — no exceptions, including for "just a doc
+# change" that touches Python.
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+jobs:
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Run backend test suite
+        run: |
+          # The end-to-end demo test (Person B) drives Person C's request
+          # engine, which lands in a separate PR. While C's routes are not
+          # in the tree yet, run everything else so individual PRs can merge
+          # in parallel; the moment C's files land, this same step runs the
+          # FULL suite including the integration test — no CI edit needed.
+          if [ -f backend/app/routes/requests.py ] && [ -f backend/app/routes/approvals.py ]; then
+            echo "Approval engine routes present - running the full suite."
+            pytest backend/tests -q
+          else
+            echo "Approval engine not merged yet - running suite without the end-to-end demo test."
+            pytest backend/tests -q --ignore=backend/tests/test_integration_happy_path.py
+          fi
+
+  frontend:
+    name: Frontend (build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend (once Person E's scaffold lands)
+        run: |
+          # Person E owns frontend/. Until the Vite scaffold is merged there
+          # is nothing to build; afterwards this step gates every PR.
+          if [ -f frontend/package.json ]; then
+            cd frontend
+            npm ci
+            npm run build
+          else
+            echo "No frontend/package.json yet (Person E scaffold pending) - skipping."
+          fi
