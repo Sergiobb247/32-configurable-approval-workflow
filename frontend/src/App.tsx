@@ -1,12 +1,12 @@
 import { Component, ErrorInfo, FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
-  Activity, AlertCircle, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronRight,
-  CircleDashed, CircleHelp, ClipboardCheck, Clock3, FilePlus2, Files, Filter, GripVertical,
-  LogOut, Menu, Plus, Search, ShieldCheck, SlidersHorizontal, Trash2, Users,
-  WalletCards, Workflow as WorkflowIcon, X, XCircle, RefreshCw, Eye, ArrowUp, ArrowDown,
+  Activity, AlertCircle, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronLeft, ChevronRight,
+  CircleDashed, CircleHelp, ClipboardCheck, FilePlus2, Files, Filter, GripVertical, Info,
+  LogOut, Menu, Plus, Search, ShieldCheck, SlidersHorizontal, Trash2, UserPlus, Users,
+  Wifi, WifiOff, Workflow as WorkflowIcon, X, XCircle, RefreshCw, Eye, ArrowUp, ArrowDown,
 } from "lucide-react";
-import { api, ApiError, ApprovalRequest, AuditEntry, RequestStatus, Role, User, Workflow, tokenStore } from "./api";
+import { api, ApiError, ApprovalRequest, AuditEntry, RequestStatus, Role, User, Workflow, bootstrapSession, clearSession, tokenStore } from "./api";
 
 const money = (amount: string | number) => new Intl.NumberFormat("en-NG", {
   style: "currency", currency: "NGN", minimumFractionDigits: 2, maximumFractionDigits: 2,
@@ -19,6 +19,13 @@ const date = (value?: string | null) => value ? new Date(value).toLocaleDateStri
 const dateTime = (value?: string | null) => value ? new Date(value).toLocaleString("en-GB", {
   day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
 }) : "—";
+
+/** Stable row keys for the workflow step editor. crypto.randomUUID() is only
+ *  available in secure contexts, so fall back rather than break over plain HTTP. */
+const uid = (): string =>
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `k-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 
 const personName = (request: ApprovalRequest) => {
   const submitter = request.submitted_by;
@@ -57,6 +64,162 @@ function EmptyState({ title, description, action }: { title: string; description
   return <div className="empty-state"><span className="empty-icon"><Files size={23}/></span><h3>{title}</h3><p>{description}</p>{action}</div>;
 }
 
+
+/**
+ * Confirmation prompts are rendered in-app rather than with `window.confirm`.
+ * Native dialogs are silently suppressed (and return false) inside sandboxed
+ * iframes and many embedded webviews, which made Reject / Cancel / Deactivate
+ * appear to do nothing at all. A real dialog always works.
+ */
+interface ConfirmOptions {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  tone?: "danger" | "primary";
+  requireComment?: { label: string; placeholder: string; help?: string };
+}
+
+function useConfirm() {
+  const [pending, setPending] = useState<(ConfirmOptions & { resolve: (value: { ok: boolean; comment: string }) => void }) | null>(null);
+  const [comment, setComment] = useState("");
+
+  const confirm = useCallback((options: ConfirmOptions) => {
+    setComment("");
+    return new Promise<{ ok: boolean; comment: string }>(resolve => {
+      setPending({ ...options, resolve });
+    });
+  }, []);
+
+  const close = (ok: boolean) => {
+    pending?.resolve({ ok, comment: comment.trim() });
+    setPending(null);
+    setComment("");
+  };
+
+  const dialog = pending ? <Modal
+    title={pending.title}
+    subtitle={pending.requireComment ? undefined : pending.message}
+    onClose={() => close(false)}
+    footer={<>
+      <button type="button" className="button button-secondary" onClick={() => close(false)}>Keep it open</button>
+      <button
+        type="button"
+        className={`button ${pending.tone === "danger" ? "button-danger" : "button-primary"}`}
+        onClick={() => close(true)}
+        disabled={Boolean(pending.requireComment) && !comment.trim()}
+      >
+        {pending.confirmLabel}
+      </button>
+    </>}
+  >
+    {pending.requireComment && <>
+      <label className="field-label" htmlFor="confirm-comment">{pending.requireComment.label}</label>
+      <textarea
+        id="confirm-comment"
+        className="text-input textarea"
+        rows={3}
+        maxLength={500}
+        autoFocus
+        value={comment}
+        onChange={event => setComment(event.target.value)}
+        placeholder={pending.requireComment.placeholder}
+      />
+      {pending.requireComment.help && <p className="field-help">{pending.requireComment.help}</p>}
+    </>}
+  </Modal> : null;
+
+  return { confirm, dialog };
+}
+
+/* ------------------------------------------------------------------------- */
+/* Shared UI primitives                                                      */
+/* ------------------------------------------------------------------------- */
+
+type ApiHealth = "checking" | "online" | "offline";
+
+/**
+ * GET /health — used as a diagnostic, not as chrome.
+ *
+ * When a sign-in or sign-up fails at the network level we probe the public
+ * health endpoint to tell "the API is down" apart from "those credentials are
+ * wrong". No polling, no permanent badge.
+ */
+async function apiReachable(): Promise<boolean> {
+  try {
+    const health = await api.health();
+    return String(health?.status).toLowerCase() === "ok";
+  } catch {
+    return false;
+  }
+}
+
+/** Turn a thrown error into the most useful sentence we can justify. */
+async function describeAuthError(error: unknown, fallback: string): Promise<string> {
+  if (error instanceof ApiError) {
+    if (error.status === 0) {
+      return (await apiReachable())
+        ? error.message
+        : "Can't reach the approval API. Make sure the backend is running, then try again.";
+    }
+    return error.message;
+  }
+  return error instanceof Error ? error.message : fallback;
+}
+
+/** Client-side windowing over an already-filtered list (API caps page size at 200). */
+function usePagedSlice<T>(items: T[], page: number, pageSize: number) {
+  const total = items.length;
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.min(Math.max(1, page), pages);
+  const slice = useMemo(
+    () => items.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [items, safePage, pageSize],
+  );
+  return { slice, page: safePage, pages, total };
+}
+
+const PAGE_SIZES = [10, 25, 50, 100];
+
+function Pager({ page, pages, total, pageSize, from, to, noun, onPage, onPageSize }: {
+  page: number; pages: number; total: number; pageSize: number; from: number; to: number;
+  noun: string; onPage: (page: number) => void; onPageSize: (size: number) => void;
+}) {
+  if (total === 0) return null;
+  return <div className="pager">
+    <span className="pager-range">Showing <strong>{from}–{to}</strong> of <strong>{total}</strong> {noun}</span>
+    <div className="pager-controls">
+      <label className="pager-size">Rows
+        <select value={pageSize} onChange={event => onPageSize(Number(event.target.value))} aria-label="Rows per page">
+          {PAGE_SIZES.map(size => <option key={size} value={size}>{size}</option>)}
+        </select>
+      </label>
+      <button type="button" className="icon-button" disabled={page <= 1} onClick={() => onPage(page - 1)} aria-label="Previous page"><ChevronLeft size={16}/></button>
+      <span className="pager-page">Page {page} of {pages}</span>
+      <button type="button" className="icon-button" disabled={page >= pages} onClick={() => onPage(page + 1)} aria-label="Next page"><ChevronRight size={16}/></button>
+    </div>
+  </div>;
+}
+
+function Modal({ title, subtitle, onClose, children, footer }: {
+  title: string; subtitle?: string; onClose: () => void; children: ReactNode; footer?: ReactNode;
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return <div className="modal-scrim" role="dialog" aria-modal="true" aria-label={title} onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="modal">
+      <div className="modal-head">
+        <div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div>
+        <button type="button" className="icon-button" onClick={onClose} aria-label="Close dialog"><X size={18}/></button>
+      </div>
+      <div className="modal-body">{children}</div>
+      {footer && <div className="modal-foot">{footer}</div>}
+    </div>
+  </div>;
+}
+
 class AppErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
   state = { hasError: false };
   static getDerivedStateFromError() { return { hasError: true }; }
@@ -73,21 +236,37 @@ function App() {
 
 function Workspace() {
   const [user, setUser] = useState<User | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
+  const [authState, setAuthState] = useState<"loading" | "ready" | "offline">("loading");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const location = useLocation();
   const navigate = useNavigate();
+  const [inboxCount, setInboxCount] = useState(0);
 
+  // Live inbox badge: GET /inbox returns the real queue depth for this role.
   useEffect(() => {
+    if (!user || (user.role !== "MANAGER" && user.role !== "FINANCE")) { setInboxCount(0); return; }
     let active = true;
-    if (!tokenStore.get() && !tokenStore.refresh()) { setAuthLoading(false); return; }
-    api.me().then(current => { if (active) setUser(current); }).catch(() => {
-      tokenStore.clear();
-    }).finally(() => { if (active) setAuthLoading(false); });
+    api.inbox({ limit: 1 })
+      .then(response => { if (active) setInboxCount(response.total); })
+      .catch(() => { if (active) setInboxCount(0); });
     return () => { active = false; };
+  }, [user, location.pathname, location.search]);
+
+  // One silent session restore. A rejected token returns to the login screen
+  // without a scary banner (nothing "expired" if there was no live session);
+  // an unreachable API keeps the tokens and offers a retry instead of a
+  // forced sign-out.
+  const restoreSession = useCallback(async () => {
+    setAuthState("loading");
+    const result = await bootstrapSession();
+    if (result.offline) { setAuthState("offline"); return; }
+    setUser(result.user);
+    setAuthState("ready");
   }, []);
+
+  useEffect(() => { void restoreSession(); }, [restoreSession]);
 
   useEffect(() => { setMobileOpen(false); setError(""); }, [location.pathname, location.search]);
 
@@ -106,14 +285,27 @@ function Workspace() {
   }, []);
 
   const logout = async () => {
-    try { await api.logout(); } catch { tokenStore.clear(); }
+    try { await api.logout(); } catch { clearSession(); }
     setUser(null);
     navigate("/login", { replace: true });
   };
 
-  if (authLoading) return <div className="loading-screen"><div className="brand-mark">F</div><span className="spinner"/><p>Preparing your workspace…</p></div>;
-  if (!user) return <Routes><Route path="/login" element={<Login onLogin={current => { setUser(current); navigate("/", { replace: true }); }}/>} /><Route path="*" element={<Navigate to="/login" replace/>}/></Routes>;
-  if (location.pathname === "/login") return <Navigate to={roleHome(user.role)} replace/>;
+  if (authState === "loading") return <div className="loading-screen"><div className="brand-mark">F</div><span className="spinner"/><p>Preparing your workspace…</p></div>;
+  if (authState === "offline") return <div className="loading-screen">
+    <span className="offline-symbol"><WifiOff size={22}/></span>
+    <h2>Can&apos;t reach the API</h2>
+    <p>The workspace server is not responding. Your session is still saved.</p>
+    <div className="offline-actions">
+      <button className="button button-primary" onClick={() => { void restoreSession(); }}>Try again</button>
+      <button className="button button-secondary" onClick={() => { clearSession(); setUser(null); setAuthState("ready"); navigate("/login", { replace: true }); }}>Back to sign in</button>
+    </div>
+  </div>;
+  if (!user) return <Routes>
+    <Route path="/login" element={<Login onLogin={current => { setUser(current); setAuthState("ready"); navigate("/", { replace: true }); }}/>}/>
+    <Route path="/register" element={<Register onRegister={current => { setUser(current); setAuthState("ready"); navigate("/", { replace: true }); }}/>}/>
+    <Route path="*" element={<Navigate to="/login" replace/>}/>
+  </Routes>;
+  if (location.pathname === "/login" || location.pathname === "/register") return <Navigate to={roleHome(user.role)} replace/>;
 
   const isAdmin = user.role === "ADMIN";
   const canInbox = user.role === "MANAGER" || user.role === "FINANCE";
@@ -125,7 +317,7 @@ function Workspace() {
       <div className="workspace-label">WORKSPACE</div>
       <nav className="nav-list" aria-label="Main navigation">
         <NavItem to="/requests" icon={<Files size={18}/>} label={requestLabel}/>
-        {canInbox && <NavItem to="/inbox" icon={<ClipboardCheck size={18}/>} label="Approval inbox"/>}
+        {canInbox && <NavItem to="/inbox" icon={<ClipboardCheck size={18}/>} label="Approval inbox" badge={inboxCount}/>}
         {isAdmin && <>
           <div className="nav-section">ADMINISTRATION</div>
           <NavItem to="/workflows" icon={<WorkflowIcon size={18}/>} label="Workflow builder"/>
@@ -164,8 +356,11 @@ function Workspace() {
   </div>;
 }
 
-function NavItem({ to, icon, label, end = false }: { to: string; icon: ReactNode; label: string; end?: boolean }) {
-  return <NavLink to={to} end={end} className={({ isActive }) => `nav-item ${isActive ? "nav-active" : ""}`}>{icon}<span>{label}</span>{label === "Approval inbox" && <span className="nav-new-dot"/>}</NavLink>;
+function NavItem({ to, icon, label, end = false, badge = 0 }: { to: string; icon: ReactNode; label: string; end?: boolean; badge?: number }) {
+  return <NavLink to={to} end={end} className={({ isActive }) => `nav-item ${isActive ? "nav-active" : ""}`}>
+    {icon}<span>{label}</span>
+    {badge > 0 && <span className="nav-count" aria-label={`${badge} waiting`}>{badge > 99 ? "99+" : badge}</span>}
+  </NavLink>;
 }
 
 function pageTitle(path: string, search = "") {
@@ -190,20 +385,30 @@ function RequestsPage({ user, setError }: { user: User; setError: (message: stri
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"ALL" | RequestStatus>("ALL");
   const [sort, setSort] = useState<"newest" | "oldest" | "amount">("newest");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [serverTotal, setServerTotal] = useState(0);
 
+  // The status filter is applied by the API (`?status=`), so the count in the
+  // footer is the server's total for that filter rather than a page-local guess.
   const load = useCallback(async () => {
     setLoading(true);
-    try { const response = await api.requests({ limit: 200 }); setRows(response.items); setError(""); }
+    try {
+      const response = await api.requests({ status: filter === "ALL" ? undefined : filter, limit: 200 });
+      setRows(response.items);
+      setServerTotal(response.total);
+      setError("");
+    }
     catch (error) { setError(error instanceof Error ? error.message : "Couldn't load requests."); }
     finally { setLoading(false); }
-  }, [setError]);
+  }, [filter, setError]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { setPage(1); }, [filter, query, pageSize]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return [...rows]
-      .filter(row => filter === "ALL" || row.status === filter)
       .filter(row => !q || `${row.title} ${personName(row)} ${row.id} ${row.workflow_id}`.toLowerCase().includes(q))
       .sort((a, b) => {
         if (sort === "amount") return Number(b.amount) - Number(a.amount);
@@ -211,7 +416,11 @@ function RequestsPage({ user, setError }: { user: User; setError: (message: stri
         const right = new Date(b.created_at).getTime();
         return sort === "newest" ? right - left : left - right;
       });
-  }, [rows, filter, query, sort]);
+  }, [rows, query, sort]);
+
+  const { slice: visible, page: safePage, pages } = usePagedSlice(filtered, page, pageSize);
+  const from = filtered.length === 0 ? 0 : (safePage - 1) * pageSize + 1;
+  const to = Math.min(safePage * pageSize, filtered.length);
 
   const title = user.role === "ADMIN" ? "All requests" : "My requests";
   const subtitle = user.role === "ADMIN" ? "Review every request visible to the workspace administrator." : "Keep track of the requests you have submitted.";
@@ -224,9 +433,10 @@ function RequestsPage({ user, setError }: { user: User; setError: (message: stri
         <div className="filter-control"><Filter size={16}/><select aria-label="Filter by status" value={filter} onChange={e => setFilter(e.target.value as "ALL" | RequestStatus)}><option value="ALL">All statuses</option><option value="PENDING">Pending</option><option value="APPROVED">Approved</option><option value="REJECTED">Rejected</option><option value="DRAFT">Draft</option><option value="CANCELLED">Cancelled</option></select></div>
         <select className="toolbar-select" aria-label="Sort requests" value={sort} onChange={e => setSort(e.target.value as typeof sort)}><option value="newest">Newest</option><option value="oldest">Oldest</option><option value="amount">Highest amount</option></select>
       </div>
-      {loading ? <TableSkeleton/> : filtered.length === 0 ? <EmptyState title={rows.length ? "No matching requests" : "No requests yet"} description={rows.length ? "Try another search or status filter." : "Create a request to start an approval workflow."} action={<Link className="button button-primary button-small" to="/requests/new"><Plus size={15}/> New request</Link>}/> :
-        <div className="table-scroll"><table><thead><tr><th>Request</th><th>Requester</th><th>Amount</th><th>Created</th><th>Status</th><th/></tr></thead><tbody>{filtered.map(row => <tr key={row.id}><td><Link to={`/requests/${row.id}`} className="request-title">{row.title}</Link><small className="table-sub">REQ-{String(row.id).padStart(4, "0")}</small></td><td>{personName(row)}</td><td className="amount-cell">{money(row.amount)}</td><td>{date(row.created_at)}</td><td><StatusBadge status={row.status}/></td><td><Link className="table-action" to={`/requests/${row.id}`} aria-label={`Open ${row.title}`}><ChevronRight size={17}/></Link></td></tr>)}</tbody></table></div>}
-      <div className="panel-foot"><span>{filtered.length} shown · {rows.length} loaded</span><span>Data comes directly from the approval API</span></div>
+      {loading ? <TableSkeleton/> : filtered.length === 0 ? <EmptyState title={rows.length || filter !== "ALL" ? "No matching requests" : "No requests yet"} description={rows.length || filter !== "ALL" ? "Try another search or status filter." : "Create a request to start an approval workflow."} action={<Link className="button button-primary button-small" to="/requests/new"><Plus size={15}/> New request</Link>}/> :
+        <div className="table-scroll"><table><thead><tr><th>Request</th><th>Requester</th><th>Amount</th><th>Created</th><th>Status</th><th/></tr></thead><tbody>{visible.map(row => <tr key={row.id}><td><Link to={`/requests/${row.id}`} className="request-title">{row.title}</Link><small className="table-sub">REQ-{String(row.id).padStart(4, "0")}</small></td><td>{personName(row)}</td><td className="amount-cell">{money(row.amount)}</td><td>{date(row.created_at)}</td><td><StatusBadge status={row.status}/></td><td><Link className="table-action" to={`/requests/${row.id}`} aria-label={`Open ${row.title}`}><ChevronRight size={17}/></Link></td></tr>)}</tbody></table></div>}
+      <Pager page={safePage} pages={pages} total={filtered.length} pageSize={pageSize} from={from} to={to} noun="requests" onPage={setPage} onPageSize={setPageSize}/>
+      <div className="panel-foot"><span>{filter === "ALL" ? `${serverTotal} visible to you` : `${serverTotal} ${filter.toLowerCase()}`}{query && ` · ${filtered.length} matching`}</span><span>Loaded live from the approval API</span></div>
     </div>
   </div>;
 }
@@ -322,6 +532,20 @@ function RequestDetail({ user, setError, notify }: { user: User; setError: (mess
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState(false);
   const [inlineError, setInlineError] = useState("");
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const [workflowName, setWorkflowName] = useState("");
+
+  // GET /workflows/{id} — the request only stores workflow_id, so the live name
+  // is resolved separately. Non-admins get a 404 for retired workflows, which
+  // is exactly why this stays best-effort.
+  useEffect(() => {
+    let active = true;
+    if (!request) { setWorkflowName(""); return; }
+    api.getWorkflow(request.workflow_id)
+      .then(workflow => { if (active) setWorkflowName(workflow.name); })
+      .catch(() => { if (active) setWorkflowName(""); });
+    return () => { active = false; };
+  }, [request]);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -342,8 +566,25 @@ function RequestDetail({ user, setError, notify }: { user: User; setError: (mess
   const submitAction = async (kind: "submit" | "approve" | "reject" | "cancel") => {
     if (!request || busy) return;
     if (kind === "reject" && !comment.trim()) { setInlineError("Add a reason before rejecting this request."); return; }
-    if (kind === "reject" && !window.confirm("Reject this request? This decision cannot be undone.")) return;
-    if (kind === "cancel" && !window.confirm("Cancel this request? This action cannot be undone.")) return;
+
+    if (kind === "reject") {
+      const answer = await confirm({
+        title: "Reject this request?",
+        message: "The approval chain stops here and the requester is notified by the record. This cannot be undone.",
+        confirmLabel: "Reject request",
+        tone: "danger",
+      });
+      if (!answer.ok) return;
+    }
+    if (kind === "cancel") {
+      const answer = await confirm({
+        title: "Cancel this request?",
+        message: "The request is withdrawn and the chain stops. This cannot be undone.",
+        confirmLabel: "Cancel request",
+        tone: "danger",
+      });
+      if (!answer.ok) return;
+    }
     setBusy(true); setInlineError(""); setError("");
     try {
       if (kind === "submit") await api.submit(request.id);
@@ -377,7 +618,7 @@ function RequestDetail({ user, setError, notify }: { user: User; setError: (mess
     <PageHeading eyebrow={`REQ-${String(request.id).padStart(4, "0")}`} title={request.title} subtitle={request.description || "Request details and approval history."} action={<StatusBadge status={request.status}/>}/>
     <div className="detail-grid">
       <section className="panel detail-main">
-        <div className="detail-summary"><div><span className="detail-label">REQUEST AMOUNT</span><div className="detail-amount">{money(request.amount)}</div></div><div><span className="detail-label">SUBMITTED BY</span><strong>{submitterName}</strong></div><div><span className="detail-label">CREATED</span><strong>{date(request.created_at)}</strong></div></div>
+        <div className="detail-summary"><div><span className="detail-label">REQUEST AMOUNT</span><div className="detail-amount">{money(request.amount)}</div></div><div><span className="detail-label">SUBMITTED BY</span><strong>{submitterName}</strong></div><div><span className="detail-label">WORKFLOW</span><strong>{workflowName || `WF-${String(request.workflow_id).padStart(3, "0")}`}</strong></div><div><span className="detail-label">CREATED</span><strong>{date(request.created_at)}</strong></div>{request.decided_at && <div><span className="detail-label">DECIDED</span><strong>{dateTime(request.decided_at)}</strong></div>}</div>
         <div className="panel-subheading"><h2>Approval progress</h2><p>{request.status === "DRAFT" ? "The approval chain is created when the draft is submitted." : "The chain below is the frozen snapshot returned by the API."}</p></div>
         <StepTimeline request={request}/>
         {(canSubmit || canDecide || canCancel) && <div className="decision-panel">
@@ -392,6 +633,7 @@ function RequestDetail({ user, setError, notify }: { user: User; setError: (mess
         </div>}
         {request.status === "PENDING" && !canDecide && !canCancel && <div className="inline-info detail-permission-note"><Eye size={17}/><span>{waitingMessage}</span></div>}
       </section>
+      {confirmDialog}
       <aside className="panel detail-side"><div className="panel-subheading"><h2>Activity history</h2><p>Recorded actions for this request</p></div>{events.length ? <div className="audit-list">{events.map((event, index) => <div className="audit-item" key={event.id || index}><span className="audit-symbol"><Activity size={15}/></span><div><strong>{formatAuditAction(event.action)}</strong><p>{auditActor(event)}{event.to_state ? ` · ${event.to_state.toLowerCase()}` : ""}</p>{event.comment && <blockquote>{event.comment}</blockquote>}<small>{dateTime(event.created_at)}</small></div></div>)}</div> : <EmptyState title="No activity yet" description="Recorded actions will appear here."/>}</aside>
     </div>
   </div>;
@@ -408,21 +650,34 @@ function InboxPage({ setError }: { setError: (message: string) => void }) {
   const [rows, setRows] = useState<ApprovalRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [serverTotal, setServerTotal] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true);
-    try { const response = await api.inbox({ limit: 200 }); setRows(response.items); setError(""); }
+    try {
+      const response = await api.inbox({ limit: 200 });
+      setRows(response.items);
+      setServerTotal(response.total);
+      setError("");
+    }
     catch (error) { setError(error instanceof Error ? error.message : "Couldn't load the approval inbox."); }
     finally { setLoading(false); }
   }, [setError]);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { setPage(1); }, [query, pageSize]);
 
   const filtered = rows.filter(row => `${row.title} ${personName(row)} ${row.id}`.toLowerCase().includes(query.trim().toLowerCase()));
+  const { slice: visible, page: safePage, pages } = usePagedSlice(filtered, page, pageSize);
+  const from = filtered.length === 0 ? 0 : (safePage - 1) * pageSize + 1;
+  const to = Math.min(safePage * pageSize, filtered.length);
   return <div className="page-content">
     <PageHeading title="Approval inbox" subtitle="Requests waiting for your role. Open one to review the chain, history, and available actions." action={<button className="button button-secondary" onClick={load}><RefreshCw size={16}/> Refresh</button>}/>
-    <div className="panel"><div className="toolbar"><div className="search-field"><Search size={17}/><input aria-label="Search inbox" placeholder="Search waiting requests…" value={query} onChange={e => setQuery(e.target.value)}/></div><span className="toolbar-meta"><ClipboardCheck size={15}/>{rows.length} waiting</span></div>
-      {loading ? <TableSkeleton/> : filtered.length === 0 ? <EmptyState title="Nothing waiting for you" description={rows.length ? "Try another search term." : "When a request reaches your role, it will appear here."}/> : <div className="table-scroll"><table><thead><tr><th>Request</th><th>Submitted by</th><th>Amount</th><th>Created</th><th>Status</th><th/></tr></thead><tbody>{filtered.map(row => <tr key={row.id}><td><Link to={`/requests/${row.id}`} className="request-title">{row.title}</Link><small className="table-sub">REQ-{String(row.id).padStart(4, "0")}</small></td><td>{personName(row)}</td><td className="amount-cell">{money(row.amount)}</td><td>{date(row.created_at)}</td><td><StatusBadge status={row.status}/></td><td><Link className="table-action" to={`/requests/${row.id}`} aria-label={`Review ${row.title}`}><ChevronRight size={17}/></Link></td></tr>)}</tbody></table></div>}
-      <div className="panel-foot"><span>{filtered.length} request{filtered.length === 1 ? "" : "s"}</span><span>Only requests awaiting your role are returned by the API</span></div>
+    <div className="panel"><div className="toolbar"><div className="search-field"><Search size={17}/><input aria-label="Search inbox" placeholder="Search waiting requests…" value={query} onChange={e => setQuery(e.target.value)}/>{query && <button onClick={() => setQuery("")} aria-label="Clear search"><X size={14}/></button>}</div><span className="toolbar-meta"><ClipboardCheck size={15}/>{serverTotal} waiting</span></div>
+      {loading ? <TableSkeleton/> : filtered.length === 0 ? <EmptyState title="Nothing waiting for you" description={rows.length ? "Try another search term." : "When a request reaches your role, it will appear here."}/> : <div className="table-scroll"><table><thead><tr><th>Request</th><th>Submitted by</th><th>Amount</th><th>Created</th><th>Status</th><th/></tr></thead><tbody>{visible.map(row => <tr key={row.id}><td><Link to={`/requests/${row.id}`} className="request-title">{row.title}</Link><small className="table-sub">REQ-{String(row.id).padStart(4, "0")}</small></td><td>{personName(row)}</td><td className="amount-cell">{money(row.amount)}</td><td>{date(row.created_at)}</td><td><StatusBadge status={row.status}/></td><td><Link className="table-action" to={`/requests/${row.id}`} aria-label={`Review ${row.title}`}><ChevronRight size={17}/></Link></td></tr>)}</tbody></table></div>}
+      <Pager page={safePage} pages={pages} total={filtered.length} pageSize={pageSize} from={from} to={to} noun="requests" onPage={setPage} onPageSize={setPageSize}/>
+      <div className="panel-foot"><span>{serverTotal} request{serverTotal === 1 ? "" : "s"} awaiting your role</span><span>Only requests waiting on your role are returned by the API</span></div>
     </div>
   </div>;
 }
@@ -436,8 +691,22 @@ function WorkflowsPage({ setError, notify }: { setError: (message: string) => vo
   const [editing, setEditing] = useState<Workflow | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [steps, setSteps] = useState<DraftStep[]>([{ key: crypto.randomUUID(), required_role: "MANAGER", label: "Manager review" }]);
+  const [steps, setSteps] = useState<DraftStep[]>([{ key: uid(), required_role: "MANAGER", label: "Manager review" }]);
   const [busy, setBusy] = useState(false);
+  const [viewingId, setViewingId] = useState<string | number | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const [viewing, setViewing] = useState<Workflow | null>(null);
+  const [viewLoading, setViewLoading] = useState(false);
+  const [viewError, setViewError] = useState("");
+
+  // GET /workflows/{id} — the authoritative, freshly-loaded configuration.
+  const openDetails = async (workflow: Workflow) => {
+    setViewingId(workflow.id); setViewing(null); setViewError(""); setViewLoading(true);
+    try { setViewing(await api.getWorkflow(workflow.id)); }
+    catch (error) { setViewError(error instanceof Error ? error.message : "Couldn't load this workflow."); }
+    finally { setViewLoading(false); }
+  };
+  const closeDetails = () => { setViewingId(null); setViewing(null); setViewError(""); };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -449,22 +718,22 @@ function WorkflowsPage({ setError, notify }: { setError: (message: string) => vo
 
   const resetForm = () => {
     setShowForm(false); setEditing(null); setName(""); setDescription("");
-    setSteps([{ key: crypto.randomUUID(), required_role: "MANAGER", label: "Manager review" }]);
+    setSteps([{ key: uid(), required_role: "MANAGER", label: "Manager review" }]);
   };
 
   const startCreate = () => {
     setEditing(null); setName(""); setDescription("");
-    setSteps([{ key: crypto.randomUUID(), required_role: "MANAGER", label: "Manager review" }]);
+    setSteps([{ key: uid(), required_role: "MANAGER", label: "Manager review" }]);
     setShowForm(true);
   };
 
   const startEdit = (workflow: Workflow) => {
     setEditing(workflow); setName(workflow.name); setDescription(workflow.description || "");
-    setSteps((workflow.steps || []).map(step => ({ key: String(step.id ?? crypto.randomUUID()), required_role: step.required_role === "FINANCE" ? "FINANCE" : "MANAGER", label: step.label })));
+    setSteps((workflow.steps || []).map(step => ({ key: String(step.id ?? uid()), required_role: step.required_role === "FINANCE" ? "FINANCE" : "MANAGER", label: step.label })));
     setShowForm(true);
   };
 
-  const addStep = () => setSteps(previous => [...previous, { key: crypto.randomUUID(), required_role: "FINANCE", label: "Finance review" }]);
+  const addStep = () => setSteps(previous => [...previous, { key: uid(), required_role: "FINANCE", label: "Finance review" }]);
   const removeStep = (key: string) => setSteps(previous => previous.filter(step => step.key !== key));
   const updateStep = (key: string, patch: Partial<DraftStep>) => setSteps(previous => previous.map(step => step.key === key ? { ...step, ...patch } : step));
   const moveStep = (index: number, direction: -1 | 1) => setSteps(previous => {
@@ -500,7 +769,15 @@ function WorkflowsPage({ setError, notify }: { setError: (message: string) => vo
 
   const toggleActive = async (workflow: Workflow) => {
     const next = !workflow.is_active;
-    if (!next && !window.confirm(`Deactivate “${workflow.name}”? New requests will no longer be able to use it.`)) return;
+    if (!next) {
+      const answer = await confirm({
+        title: `Deactivate “${workflow.name}”?`,
+        message: "New requests will no longer be able to use this workflow. Requests already in flight keep their frozen chain.",
+        confirmLabel: "Deactivate workflow",
+        tone: "danger",
+      });
+      if (!answer.ok) return;
+    }
     try {
       const updated = await api.updateWorkflow(workflow.id, { is_active: next });
       setRows(previous => previous.map(item => item.id === updated.id ? updated : item));
@@ -530,8 +807,32 @@ function WorkflowsPage({ setError, notify }: { setError: (message: string) => vo
         <h2>{workflow.name}</h2><p>{workflow.description || "Approval workflow"}</p>
         <div className="workflow-steps">{workflow.steps.map((step, index) => <div className="workflow-step" key={step.id || `${workflow.id}-${index}`}><span>{step.step_order}</span><div><strong>{step.label}</strong><small>{roleLabel(step.required_role)}</small></div>{index < workflow.steps.length - 1 && <div className="workflow-connector"/>}</div>)}</div>
         <div className="workflow-card-foot"><span><SlidersHorizontal size={14}/> {workflow.steps.length} step{workflow.steps.length === 1 ? "" : "s"}</span><span>WF-{String(workflow.id).padStart(3, "0")}</span></div>
-        <div className="workflow-card-actions"><button className="button button-secondary button-small" onClick={() => startEdit(workflow)}>Edit workflow</button><button className="button button-secondary button-small" onClick={() => toggleActive(workflow)}>{workflow.is_active ? "Deactivate" : "Activate"}</button></div>
+        <div className="workflow-card-actions"><button className="button button-secondary button-small" onClick={() => openDetails(workflow)}><Eye size={14}/> Details</button><button className="button button-secondary button-small" onClick={() => startEdit(workflow)}>Edit workflow</button><button className="button button-secondary button-small" onClick={() => toggleActive(workflow)}>{workflow.is_active ? "Deactivate" : "Activate"}</button></div>
       </div>)}</div>}
+    {confirmDialog}
+    {viewingId !== null && <Modal
+      title={viewing?.name || "Workflow details"}
+      subtitle={viewing?.description || "Ordered approval chain"}
+      onClose={closeDetails}
+      footer={<>
+        <button className="button button-secondary" onClick={closeDetails}>Close</button>
+        {viewing && <button className="button button-primary" onClick={() => { closeDetails(); startEdit(viewing); }}>Edit this workflow</button>}
+      </>}
+    >
+      {viewLoading ? <TableSkeleton/> : viewError ? <div className="inline-warning" role="alert"><AlertCircle size={16}/>{viewError}</div> : viewing ? <>
+        <div className="detail-summary detail-summary-compact">
+          <div><span className="detail-label">WORKFLOW ID</span><strong>WF-{String(viewing.id).padStart(3, "0")}</strong></div>
+          <div><span className="detail-label">STATUS</span><span className={`status ${viewing.is_active ? "status-approved" : "status-cancelled"}`}><span className="status-dot"/>{viewing.is_active ? "Active" : "Inactive"}</span></div>
+          <div><span className="detail-label">STEPS</span><strong>{viewing.steps.length}</strong></div>
+        </div>
+        <div className="panel-subheading"><h2>Ordered chain</h2><p>Requests submitted today freeze this list onto themselves; later edits do not change them.</p></div>
+        <div className="timeline">{viewing.steps.map((step, index) => <div className="timeline-item" key={step.id ?? index}>
+          <span className="timeline-marker">{index + 1}</span>
+          <div className="timeline-content"><div className="timeline-title"><strong>{step.label}</strong><span className="timeline-state">{roleLabel(step.required_role)}</span></div><p>Approved by any user holding the {roleLabel(step.required_role)} role.</p></div>
+        </div>)}</div>
+        <div className="inline-info"><Info size={16}/><span>{viewing.is_active ? "This workflow is offered to new requests." : "Inactive workflows cannot be chosen for new requests."}</span></div>
+      </> : null}
+    </Modal>}
   </div>;
 }
 
@@ -540,6 +841,9 @@ function UsersPage({ user, setError, notify }: { user: User; setError: (message:
   const [auditRows, setAuditRows] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
+  const [auditFilter, setAuditFilter] = useState<"ALL" | "request" | "workflow" | "user">("ALL");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const [savingId, setSavingId] = useState<string | number | null>(null);
   const location = useLocation();
   const navigate = useNavigate();
@@ -554,28 +858,71 @@ function UsersPage({ user, setError, notify }: { user: User; setError: (message:
     finally { setLoading(false); }
   }, [setError]);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { setPage(1); }, [query, auditFilter, auditMode, pageSize]);
 
   const update = async (target: User, payload: { role?: Role; is_active?: boolean }) => {
     if (String(target.id) === String(user.id)) return;
     setSavingId(target.id);
+    setError("");
     try {
       const updated = await api.updateUser(target.id, payload);
       setRows(previous => previous.map(item => item.id === updated.id ? updated : item));
-      notify("User updated.");
+      notify(payload.role ? "Role updated and recorded in the audit trail." : "Account status updated and recorded in the audit trail.");
+      // Role/status changes append audit rows, so refresh the read-only feed.
+      await load();
     } catch (error) { setError(error instanceof Error ? error.message : "Couldn't update user."); }
     finally { setSavingId(null); }
   };
 
-  const filteredUsers = rows.filter(person => `${userName(person)} ${person.email} ${person.role}`.toLowerCase().includes(query.trim().toLowerCase()));
-  const filteredAudit = auditRows.filter(event => `${event.action} ${auditActor(event)} ${event.request_id || ""} ${event.entity_type || ""} ${event.comment || ""}`.toLowerCase().includes(query.trim().toLowerCase()));
+  const term = query.trim().toLowerCase();
+  const filteredUsers = rows.filter(person => `${userName(person)} ${person.email} ${person.role}`.toLowerCase().includes(term));
+  const filteredAudit = auditRows
+    .filter(event => auditFilter === "ALL" || event.entity_type === auditFilter)
+    .filter(event => !term || `${event.action} ${auditActor(event)} ${event.request_id || ""} ${event.entity_type || ""} ${event.comment || ""}`.toLowerCase().includes(term));
+
+  const userView = usePagedSlice(filteredUsers, page, pageSize);
+  const auditView = usePagedSlice(filteredAudit, page, pageSize);
+  const view = auditMode ? auditView : userView;
+  const from = view.total === 0 ? 0 : (view.page - 1) * pageSize + 1;
+  const to = Math.min(view.page * pageSize, view.total);
 
   return <div className="page-content">
-    <PageHeading title={auditMode ? "Global audit" : "Users"} subtitle={auditMode ? "A read-only record of workflow, account, and request changes." : "Manage workspace roles and account access. You cannot change your own role or deactivate yourself."}/>
+    <PageHeading title={auditMode ? "Global audit" : "Users"} subtitle={auditMode ? "A read-only record of workflow, account, and request changes." : "Manage workspace roles and account access. You cannot change your own role or deactivate yourself."} action={<button className="button button-secondary" onClick={load}><RefreshCw size={16}/> Refresh</button>}/>
     <div className="panel">
-      <div className="admin-tabs"><button className={!auditMode ? "admin-tab admin-tab-active" : "admin-tab"} onClick={() => { setQuery(""); navigate("/users"); }}>Users</button><button className={auditMode ? "admin-tab admin-tab-active" : "admin-tab"} onClick={() => { setQuery(""); navigate("/users?tab=audit"); }}>Global audit</button></div>
-      <div className="toolbar"><div className="search-field"><Search size={17}/><input placeholder={auditMode ? "Search audit events…" : "Search users…"} aria-label={auditMode ? "Search audit events" : "Search users"} value={query} onChange={e => setQuery(e.target.value)}/></div><span className="toolbar-meta">{auditMode ? `${filteredAudit.length} events` : `${filteredUsers.length} users`}</span><button className="button button-secondary button-small" onClick={load}><RefreshCw size={15}/> Refresh</button></div>
-      {loading ? <TableSkeleton/> : auditMode ? (filteredAudit.length === 0 ? <EmptyState title="No audit events found" description="Events will appear as the team creates workflows, submits requests, and makes decisions."/> : <div className="table-scroll"><table><thead><tr><th>Action</th><th>Actor</th><th>Record</th><th>Transition</th><th>Date</th></tr></thead><tbody>{filteredAudit.map((event, index) => <tr key={event.id || index}><td><strong>{formatAuditAction(event.action)}</strong></td><td>{auditActor(event)}</td><td>{event.request_id ? `Request #${event.request_id}` : `${event.entity_type || "Record"} #${event.entity_id ?? "—"}`}</td><td><span className="transition-text">{event.from_state || "—"} <ArrowRight size={12}/> {event.to_state || "—"}</span></td><td>{dateTime(event.created_at)}</td></tr>)}</tbody></table></div>) : (filteredUsers.length === 0 ? <EmptyState title="No users found" description="Try another search term."/> : <div className="table-scroll"><table><thead><tr><th>User</th><th>Email</th><th>Role</th><th>Account</th></tr></thead><tbody>{filteredUsers.map(person => <tr key={person.id}><td><div className="person-cell"><Avatar user={person}/><strong>{userName(person)}</strong></div></td><td>{person.email}</td><td><select className="table-select" aria-label={`Role for ${person.email}`} value={person.role} disabled={String(person.id) === String(user.id) || savingId === person.id} onChange={e => update(person, { role: e.target.value as Role })}><option value="EMPLOYEE">Employee</option><option value="MANAGER">Manager</option><option value="FINANCE">Finance</option><option value="ADMIN">Admin</option></select></td><td><button className={`status-toggle ${person.is_active === false ? "status-toggle-off" : ""}`} disabled={String(person.id) === String(user.id) || savingId === person.id} onClick={() => update(person, { is_active: person.is_active === false })}>{savingId === person.id ? "Saving…" : person.is_active === false ? "Inactive · Activate" : "Active · Deactivate"}</button></td></tr>)}</tbody></table></div>)}
-      <div className="panel-foot"><span>{auditMode ? `${filteredAudit.length} events` : `${filteredUsers.length} users`}</span><span>{auditMode ? "Audit records are read-only" : "Changes are recorded by the backend"}</span></div>
+      <div className="admin-tabs">
+        <button className={!auditMode ? "admin-tab admin-tab-active" : "admin-tab"} onClick={() => { setQuery(""); navigate("/users"); }}>Users</button>
+        <button className={auditMode ? "admin-tab admin-tab-active" : "admin-tab"} onClick={() => { setQuery(""); navigate("/users?tab=audit"); }}>Global audit</button>
+      </div>
+      <div className="toolbar">
+        <div className="search-field"><Search size={17}/><input placeholder={auditMode ? "Search audit events…" : "Search users…"} aria-label={auditMode ? "Search audit events" : "Search users"} value={query} onChange={e => setQuery(e.target.value)}/>{query && <button onClick={() => setQuery("")} aria-label="Clear search"><X size={14}/></button>}</div>
+        {auditMode && <div className="filter-control"><Filter size={16}/><select aria-label="Filter audit by record type" value={auditFilter} onChange={e => setAuditFilter(e.target.value as typeof auditFilter)}><option value="ALL">All records</option><option value="request">Requests</option><option value="workflow">Workflows</option><option value="user">Users</option></select></div>}
+        <span className="toolbar-meta">{auditMode ? <><Activity size={15}/>{filteredAudit.length} events</> : <><Users size={15}/>{filteredUsers.length} users</>}</span>
+      </div>
+      {loading ? <TableSkeleton/> : auditMode ? (
+        filteredAudit.length === 0
+          ? <EmptyState title="No audit events found" description="Events will appear as the team creates workflows, submits requests, and makes decisions."/>
+          : <div className="table-scroll"><table><thead><tr><th>Action</th><th>Actor</th><th>Record</th><th>Transition</th><th>Comment</th><th>Date</th></tr></thead><tbody>{auditView.slice.map((event, index) => <tr key={event.id || index}>
+              <td><strong>{formatAuditAction(event.action)}</strong></td>
+              <td>{auditActor(event)}</td>
+              <td>{event.entity_type === "request" && event.request_id
+                ? <Link className="table-action-inline" to={`/requests/${event.request_id}`}>Request #{event.request_id} <ChevronRight size={13}/></Link>
+                : `${roleLabel(event.entity_type) || "Record"} #${event.entity_id ?? "—"}`}</td>
+              <td><span className="transition-text">{event.from_state || "—"} <ArrowRight size={12}/> {event.to_state || "—"}</span></td>
+              <td className="comment-cell">{event.comment || "—"}</td>
+              <td>{dateTime(event.created_at)}</td>
+            </tr>)}</tbody></table></div>
+      ) : (
+        filteredUsers.length === 0
+          ? <EmptyState title="No users found" description="Try another search term."/>
+          : <div className="table-scroll"><table><thead><tr><th>User</th><th>Email</th><th>Role</th><th>Account</th></tr></thead><tbody>{userView.slice.map(person => <tr key={person.id}>
+              <td><div className="person-cell"><Avatar user={person}/><strong>{userName(person)}</strong>{String(person.id) === String(user.id) && <small className="table-sub">You</small>}</div></td>
+              <td>{person.email}</td>
+              <td><select className="table-select" aria-label={`Role for ${person.email}`} value={person.role} disabled={String(person.id) === String(user.id) || savingId === person.id} onChange={e => update(person, { role: e.target.value as Role })}><option value="EMPLOYEE">Employee</option><option value="MANAGER">Manager</option><option value="FINANCE">Finance</option><option value="ADMIN">Admin</option></select></td>
+              <td><button className={`status-toggle ${person.is_active === false ? "status-toggle-off" : ""}`} disabled={String(person.id) === String(user.id) || savingId === person.id} onClick={() => update(person, { is_active: person.is_active === false })}>{savingId === person.id ? "Saving…" : person.is_active === false ? "Inactive · Activate" : "Active · Deactivate"}</button></td>
+            </tr>)}</tbody></table></div>
+      )}
+      <Pager page={view.page} pages={view.pages} total={view.total} pageSize={pageSize} from={from} to={to} noun={auditMode ? "events" : "users"} onPage={setPage} onPageSize={setPageSize}/>
+      <div className="panel-foot"><span>{auditMode ? `${auditRows.length} audit events loaded` : `${rows.length} accounts loaded`}</span><span>{auditMode ? "Audit records are append-only — no edit or delete exists" : "Changes are recorded by the backend"}</span></div>
     </div>
   </div>;
 }
@@ -593,9 +940,12 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
     event.preventDefault();
     if (busy) return;
     setBusy(true); setError("");
-    try { onLogin(await api.login(email.trim().toLowerCase(), password)); }
-    catch (requestError) { setError(requestError instanceof Error ? requestError.message : "Couldn't sign in. Check your details and try again."); }
-    finally { setBusy(false); }
+    try {
+      const signedIn = await api.login(email.trim().toLowerCase(), password);
+      onLogin(signedIn);
+    } catch (requestError) {
+      setError(await describeAuthError(requestError, "Couldn't sign in. Check your details and try again."));
+    } finally { setBusy(false); }
   };
 
   return <div className="login-page">
@@ -605,8 +955,80 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
       <label className="field-label" htmlFor="password">Password</label><div className="login-input-wrap"><ShieldCheck size={17}/><input id="password" type={showPassword ? "text" : "password"} value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" required/><button type="button" className="show-password" onClick={() => setShowPassword(value => !value)}>{showPassword ? "Hide" : "Show"}</button></div>
       <button className="button button-primary login-submit" type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}<ArrowRight size={17}/></button>
       <div className="login-security"><ShieldCheck size={15}/> Your session is protected by role-based access.</div>
+      <p className="auth-switch">No account yet? <Link to="/register">Create one</Link></p>
       <details className="demo-accounts"><summary>Demo account details</summary><p>Seeded local accounts use password <code>Password123!</code></p><button type="button" onClick={() => { setEmail("employee1@demo.io"); setPassword("Password123!"); }}>Employee</button><button type="button" onClick={() => { setEmail("manager1@demo.io"); setPassword("Password123!"); }}>Manager</button><button type="button" onClick={() => { setEmail("finance@demo.io"); setPassword("Password123!"); }}>Finance</button><button type="button" onClick={() => { setEmail("admin@demo.io"); setPassword("Password123!"); }}>Admin</button></details>
     </form><div className="login-bottom">© {new Date().getFullYear()} FlowApprove <span>•</span> Built for teams that need clarity.</div></div>
+  </div>;
+}
+
+function Register({ onRegister }: { onRegister: (user: User) => void }) {
+  const [fullName, setFullName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (busy) return;
+    setError("");
+    const trimmedName = fullName.trim();
+    const normalisedEmail = email.trim().toLowerCase();
+    if (trimmedName.length < 1) return setError("Enter your full name.");
+    if (!normalisedEmail.includes("@")) return setError("Enter a valid email address.");
+    if (password.length < 8) return setError("Passwords must be at least 8 characters.");
+    if (password.length > 72) return setError("Passwords cannot be longer than 72 characters.");
+    if (password !== confirm) return setError("The two passwords do not match.");
+
+    setBusy(true);
+    try {
+      // POST /auth/register returns the created user; then sign in for tokens.
+      await api.register({ full_name: trimmedName, email: normalisedEmail, password });
+      const signedIn = await api.login(normalisedEmail, password);
+      onRegister(signedIn);
+    } catch (requestError) {
+      setError(await describeAuthError(requestError, "Couldn't create your account."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <div className="login-page">
+    <div className="login-decoration">
+      <div className="login-orbit orbit-one"/><div className="login-orbit orbit-two"/>
+      <div className="login-brand"><span className="brand-mark"><ShieldCheck size={21}/></span><span>Flow<span className="brand-light">Approve</span></span></div>
+      <div className="login-message">
+        <div className="login-kicker"><span/> CLEAR DECISIONS. REAL ACCOUNTABILITY.</div>
+        <h1>Join the<br/>workspace.</h1>
+        <p>Create an account to submit requests and follow every approval decision, step by step, with the full trail attached.</p>
+        <div className="login-proof"><span><CheckCheck size={16}/> Start as an Employee</span><span><CheckCheck size={16}/> An admin can change your role</span><span><CheckCheck size={16}/> Every action is recorded</span></div>
+      </div>
+      <div className="login-decoration-foot">FLOWAPPROVE · WORKSPACE</div>
+    </div>
+    <div className="login-form-area">
+      <form className="login-form" onSubmit={submit}>
+        <div className="mobile-login-brand"><span className="brand-mark"><ShieldCheck size={21}/></span><span>Flow<span className="brand-light">Approve</span></span></div>
+        <div className="eyebrow">GET STARTED</div>
+        <h2>Create your account</h2>
+        <p className="login-intro">New accounts are created with the Employee role.</p>
+        {error && <div className="alert alert-error" role="alert"><AlertCircle size={16}/><span>{error}</span></div>}
+        <label className="field-label" htmlFor="register-name">Full name</label>
+        <div className="login-input-wrap"><Users size={17}/><input id="register-name" value={fullName} onChange={e => setFullName(e.target.value)} autoComplete="name" placeholder="Ada Obi" maxLength={120} required/></div>
+        <label className="field-label" htmlFor="register-email">Email address</label>
+        <div className="login-input-wrap"><Users size={17}/><input id="register-email" type="email" value={email} onChange={e => setEmail(e.target.value)} autoComplete="email" placeholder="you@company.com" required/></div>
+        <label className="field-label" htmlFor="register-password">Password</label>
+        <div className="login-input-wrap"><ShieldCheck size={17}/><input id="register-password" type={showPassword ? "text" : "password"} value={password} onChange={e => setPassword(e.target.value)} autoComplete="new-password" minLength={8} maxLength={72} required/><button type="button" className="show-password" onClick={() => setShowPassword(value => !value)}>{showPassword ? "Hide" : "Show"}</button></div>
+        <div className="field-help">At least 8 characters.</div>
+        <label className="field-label" htmlFor="register-confirm">Confirm password</label>
+        <div className="login-input-wrap"><ShieldCheck size={17}/><input id="register-confirm" type={showPassword ? "text" : "password"} value={confirm} onChange={e => setConfirm(e.target.value)} autoComplete="new-password" required/></div>
+        <button className="button button-primary login-submit" type="submit" disabled={busy}>{busy ? "Creating account…" : "Create account"}<ArrowRight size={17}/></button>
+        <div className="login-security"><ShieldCheck size={15}/> Your password is hashed on the server; it is never stored in the browser.</div>
+        <p className="auth-switch">Already have an account? <Link to="/login">Sign in</Link></p>
+      </form>
+      <div className="login-bottom">© {new Date().getFullYear()} FlowApprove <span>•</span> Built for teams that need clarity.</div>
+    </div>
   </div>;
 }
 
